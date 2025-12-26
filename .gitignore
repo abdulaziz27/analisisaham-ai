@@ -1,0 +1,30 @@
+# Environment Variables (Sangat Penting)
+.env
+.env.local
+.env.*
+env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
+logs/
+tmp/
+
+# Database
+*.sqlite3
+*.db
+
+# Midtrans / Payment debugging
+debug_payment.py
