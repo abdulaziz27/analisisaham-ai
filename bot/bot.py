@@ -60,13 +60,16 @@ async def post_init(application: Application):
     """
     Set up bot commands menu on startup
     """
-    commands = [
-        BotCommand("start", "Mulai bot & bantuan"),
-        BotCommand("analisa", "Analisa saham (e.g. /analisa BBCA)"),
-        BotCommand("kuota", "Cek sisa kuota & Info akun"),
-    ]
-    await application.bot.set_my_commands(commands)
-    logger.info("Bot commands menu updated successfully")
+    try:
+        commands = [
+            BotCommand("start", "Mulai bot & bantuan"),
+            BotCommand("analisa", "Analisa saham (e.g. /analisa BBCA)"),
+            BotCommand("kuota", "Cek sisa kuota & Info akun"),
+        ]
+        await application.bot.set_my_commands(commands)
+        logger.info("Bot commands menu updated successfully")
+    except Exception as e:
+        logger.error(f"Failed to update bot commands: {e}")
 
 def main():
     """

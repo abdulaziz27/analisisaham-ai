@@ -21,9 +21,10 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def ensure_quota_tables():
-    """Ensure quota table exists"""
+    """Ensure quota table exists and has necessary columns"""
     try:
         with engine.connect() as conn:
+            # 1. Create table if not exists
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS user_quotas (
                     user_id VARCHAR(255) PRIMARY KEY,
@@ -33,9 +34,36 @@ def ensure_quota_tables():
                 );
             """))
             conn.commit()
-            logger.info("Checked/Created user_quotas table")
+            
+            # 2. Add columns if not exist (Migration Logic)
+            # Check if columns exist
+            res = conn.execute(text("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='user_quotas';
+            """))
+            existing_columns = [row[0] for row in res.fetchall()]
+            
+            if 'username' not in existing_columns:
+                conn.execute(text("ALTER TABLE user_quotas ADD COLUMN username VARCHAR(255);"))
+                logger.info("Added username column to user_quotas")
+                
+            if 'first_name' not in existing_columns:
+                conn.execute(text("ALTER TABLE user_quotas ADD COLUMN first_name VARCHAR(255);"))
+                
+            if 'last_name' not in existing_columns:
+                conn.execute(text("ALTER TABLE user_quotas ADD COLUMN last_name VARCHAR(255);"))
+                
+            if 'language_code' not in existing_columns:
+                conn.execute(text("ALTER TABLE user_quotas ADD COLUMN language_code VARCHAR(10);"))
+                
+            if 'is_premium' not in existing_columns:
+                conn.execute(text("ALTER TABLE user_quotas ADD COLUMN is_premium BOOLEAN DEFAULT FALSE;"))
+                
+            conn.commit()
+            logger.info("Checked/Created user_quotas table schema")
     except Exception as e:
-        logger.error(f"Error creating quota tables: {str(e)}")
+        logger.error(f"Error creating/migrating quota tables: {str(e)}")
 
 # Initialize tables on module load
 ensure_quota_tables()
@@ -78,18 +106,42 @@ async def check_quota(user_id: str) -> bool:
         return True
 
 
-async def get_quota_info(user_id: str) -> dict:
+async def get_quota_info(
+    user_id: str, 
+    username: str = None, 
+    first_name: str = None,
+    last_name: str = None,
+    language_code: str = None,
+    is_premium: bool = None
+) -> dict:
     """
-    Get detailed quota information for user
-    
-    Args:
-        user_id: User ID to get quota info for
-    
-    Returns:
-        Dictionary with remaining and total_requests, or None if user doesn't exist
+    Get detailed quota information for user and update user info
     """
     try:
         with engine.connect() as conn:
+            # 1. Try to update existing user info
+            if any([username, first_name, last_name, language_code, is_premium is not None]):
+                conn.execute(text("""
+                    UPDATE user_quotas 
+                    SET 
+                        username = COALESCE(:username, username),
+                        first_name = COALESCE(:first_name, first_name),
+                        last_name = COALESCE(:last_name, last_name),
+                        language_code = COALESCE(:language_code, language_code),
+                        is_premium = COALESCE(:is_premium, is_premium),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = :user_id
+                """), {
+                    "user_id": user_id, 
+                    "username": username, 
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "language_code": language_code,
+                    "is_premium": is_premium
+                })
+                conn.commit()
+
+            # 2. Get info (or insert default if not exists)
             result = conn.execute(text("""
                 SELECT requests_remaining, total_requests 
                 FROM user_quotas 
@@ -99,12 +151,19 @@ async def get_quota_info(user_id: str) -> dict:
             row = result.fetchone()
             
             if row is None:
-                # User doesn't exist, create with default quota (3 requests for new users)
+                # User doesn't exist, create with default quota
                 conn.execute(text("""
-                    INSERT INTO user_quotas (user_id, requests_remaining, total_requests)
-                    VALUES (:user_id, 3, 0)
+                    INSERT INTO user_quotas (user_id, requests_remaining, total_requests, username, first_name, last_name, language_code, is_premium)
+                    VALUES (:user_id, 3, 0, :username, :first_name, :last_name, :language_code, :is_premium)
                     ON CONFLICT (user_id) DO NOTHING
-                """), {"user_id": user_id})
+                """), {
+                    "user_id": user_id, 
+                    "username": username, 
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "language_code": language_code,
+                    "is_premium": is_premium
+                })
                 conn.commit()
                 return {"remaining": 3, "total": 0}
             

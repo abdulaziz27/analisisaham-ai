@@ -25,17 +25,25 @@ class QuotaDecrementRequest(BaseModel):
     description="Mengecek sisa kuota analisis untuk user ID tertentu."
 )
 async def check_user_quota(
-    user_id: str = Query(..., description="ID Telegram User untuk dicek kuotanya", example="12345678")
+    user_id: str = Query(..., description="ID Telegram User untuk dicek kuotanya", example="12345678"),
+    username: str = Query(None, description="Username Telegram"),
+    first_name: str = Query(None, description="Nama Depan"),
+    last_name: str = Query(None, description="Nama Belakang"),
+    language_code: str = Query(None, description="Bahasa"),
+    is_premium: bool = Query(None, description="Status Premium")
 ):
     """
-    Check user's remaining quota
-    
-    Returns:
-        ok: True if user has quota, False otherwise
-        remaining: Number of requests remaining
+    Check user's remaining quota and update profile info
     """
     try:
-        quota_info = await get_quota_info(user_id)
+        quota_info = await get_quota_info(
+            user_id, 
+            username, 
+            first_name, 
+            last_name, 
+            language_code, 
+            is_premium
+        )
         
         if quota_info is None:
             # User doesn't exist, create with 3 free requests

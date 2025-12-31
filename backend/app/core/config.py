@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # Vercel
     VERCEL_URL: str = ""
     
+    # Telegram
+    TELEGRAM_BOT_TOKEN: str
+    API_BASE_URL: str = "http://localhost:8000"
+    
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE) if ENV_FILE.exists() else ".env",
         case_sensitive=True,

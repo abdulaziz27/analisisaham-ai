@@ -13,14 +13,24 @@ async def kuota_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Check user's remaining quota
     """
-    user_id = str(update.effective_user.id)
-    user_name = update.effective_user.first_name
+    user = update.effective_user
+    user_id = str(user.id)
+    user_data = {
+        "user_id": user_id,
+        "username": user.username,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "language_code": user.language_code,
+        "is_premium": getattr(user, 'is_premium', False)
+    }
+    
+    user_name_display = user.first_name if user.first_name else user_id
     
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{BASE_URL}/quota/check",
-                params={"user_id": user_id}
+                params=user_data
             )
             
             if response.status_code == 200:
@@ -29,7 +39,7 @@ async def kuota_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # Create message
                 msg = (
-                    f"👤 **Info Akun: {user_name}**\n\n"
+                    f"👤 **Info Akun: {user_name_display}**\n\n"
                     f"🎫 **Sisa Kuota:** {remaining} request\n"
                     f"🆔 **ID:** `{user_id}`\n\n"
                 )

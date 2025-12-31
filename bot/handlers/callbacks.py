@@ -54,23 +54,31 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 if response.status_code == 200:
                     result = response.json()
-                    payment_url = result.get("payment_url")
+                    qr_url = result.get("payment_url")
                     plan_name = result.get("plan_name")
                     amount = result.get("amount")
+                    expiry_time = result.get("expiry_time", "15 Menit")
                     
-                    keyboard = [
-                        [InlineKeyboardButton("💳 Bayar Sekarang", url=payment_url)]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    
-                    await query.edit_message_text(
-                        f"🧾 **Tagihan Pembayaran**\n\n"
-                        f"Item: {plan_name}\n"
-                        f"Harga: Rp {amount:,.0f}\n\n"
-                        "Klik tombol di bawah untuk melanjutkan pembayaran via Midtrans (QRIS, GoPay, VA Bank).",
-                        parse_mode='Markdown',
-                        reply_markup=reply_markup
-                    )
+                    if qr_url:
+                        # Send QR Code Image
+                        await query.delete_message()
+                        await context.bot.send_photo(
+                            chat_id=user_id,
+                            photo=qr_url,
+                            caption=(
+                                f"🧾 *Scan QRIS*\n\n"
+                                f"📦 Paket: {plan_name}\n"
+                                f"💰 Total: Rp {amount:,.0f}\n"
+                                f"⏳ *Berlaku s/d: {expiry_time}*\n\n"
+                                "1. Buka Gojek/OVO/Shopee/BCA Mobile\n"
+                                "2. Scan QR di atas\n"
+                                "3. Kuota masuk otomatis setelah bayar!\n\n"
+                                f"🔗 [Link QRIS untuk Simulator]({qr_url})"
+                            ),
+                            parse_mode='Markdown'
+                        )
+                    else:
+                        await query.edit_message_text("❌ Gagal generate QRIS. Coba lagi nanti.")
                 else:
                     error_msg = response.json().get("detail", "Unknown error")
                     await query.edit_message_text(f"❌ Gagal membuat tagihan: {error_msg}")

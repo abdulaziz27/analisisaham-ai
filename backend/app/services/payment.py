@@ -14,8 +14,8 @@ import uuid
 
 logger = logging.getLogger(__name__)
 
-# Initialize Midtrans Snap API
-snap = midtransclient.Snap(
+# Initialize Midtrans Core API
+core_api = midtransclient.CoreApi(
     is_production=settings.MIDTRANS_IS_PRODUCTION,
     server_key=settings.MIDTRANS_SERVER_KEY,
     client_key=settings.MIDTRANS_CLIENT_KEY
@@ -54,7 +54,7 @@ ensure_payment_tables()
 
 async def create_transaction(user_id: str, plan_id: str) -> dict:
     """
-    Create a new transaction and get Midtrans payment URL
+    Create a new QRIS transaction via Core API
     """
     if plan_id not in PLANS:
         raise ValueError(f"Invalid plan_id: {plan_id}")
@@ -62,10 +62,18 @@ async def create_transaction(user_id: str, plan_id: str) -> dict:
     plan = PLANS[plan_id]
     order_id = f"ORDER-{user_id}-{int(time.time())}-{str(uuid.uuid4())[:4]}"
     
+    # Calculate custom expiry (15 minutes)
+    expiry_duration = 15
+    
     param = {
+        "payment_type": "qris",
         "transaction_details": {
             "order_id": order_id,
             "gross_amount": plan["price"]
+        },
+        "custom_expiry": {
+            "expiry_duration": expiry_duration,
+            "unit": "minute"
         },
         "customer_details": {
             "user_id": user_id,
@@ -75,40 +83,74 @@ async def create_transaction(user_id: str, plan_id: str) -> dict:
             "price": plan["price"],
             "quantity": 1,
             "name": plan["name"]
-        }]
+        }],
+        "qris": {
+            "acquirer": "gopay"
+        }
     }
     
     try:
-        # Create Snap Token
-        transaction = snap.create_transaction(param)
-        payment_url = transaction['redirect_url']
-        token = transaction['token']
+        # Create Core API Transaction
+        response = core_api.charge(param)
         
+        # Calculate expiry time string for display (approximate based on request time)
+        # Midtrans response usually has transaction_time, but expiry_time depends on custom_expiry
+        # We'll calculate it locally for display accuracy
+        from datetime import datetime, timedelta
+        import pytz
+        
+        # WIB Timezone
+        tz_wib = pytz.timezone('Asia/Jakarta')
+        now = datetime.now(tz_wib)
+        expiry_time = now + timedelta(minutes=expiry_duration)
+        expiry_str = expiry_time.strftime("%H:%M WIB")
+        
+        # Extract QR Code URL
+        # For Sandbox, actions might contain the qr url
+        qr_url = None
+        if 'actions' in response:
+            for action in response['actions']:
+                if action['name'] == 'generate-qr-code':
+                    qr_url = action['url']
+                    break
+        
+        # Fallback/Direct access (depends on Midtrans version response)
+        if not qr_url and 'qr_string' in response:
+             # If raw QR string is provided, we might need to generate image ourselves
+             # But usually actions['url'] is the image for Sandbox
+             pass
+             
+        # In Sandbox, QRIS is simulated via GoPay
+        if settings.MIDTRANS_IS_PRODUCTION is False and not qr_url:
+             # Sandbox often returns actions for simulator
+             pass
+
         # Save to DB
         with engine.connect() as conn:
             conn.execute(text("""
                 INSERT INTO transactions (order_id, user_id, plan_id, amount, status, payment_url, snap_token)
-                VALUES (:order_id, :user_id, :plan_id, :amount, 'pending', :payment_url, :token)
+                VALUES (:order_id, :user_id, :plan_id, :amount, 'pending', :payment_url, NULL)
             """), {
                 "order_id": order_id,
                 "user_id": user_id,
                 "plan_id": plan_id,
                 "amount": plan["price"],
-                "payment_url": payment_url,
-                "token": token
+                "payment_url": qr_url, # Store QR Image URL here
             })
             conn.commit()
             
         return {
             "order_id": order_id,
-            "payment_url": payment_url,
+            "payment_url": qr_url, # This will be the QR Image URL
             "plan_name": plan["name"],
-            "amount": plan["price"]
+            "amount": plan["price"],
+            "type": "qris",
+            "expiry_time": expiry_str
         }
         
     except Exception as e:
         logger.error(f"Error creating transaction: {str(e)}")
-        raise Exception("Gagal membuat transaksi pembayaran")
+        raise Exception(f"Gagal membuat QRIS: {str(e)}")
 
 import httpx
 
@@ -184,23 +226,40 @@ async def process_notification(notification_data: dict) -> dict:
                 
                 logger.info(f"Adding {quota_to_add} quota to user {user_id}")
                 
-                conn.execute(text("""
+                # Update and get new total
+                result = conn.execute(text("""
                     UPDATE user_quotas 
                     SET 
                         requests_remaining = requests_remaining + :quota,
-                        total_requests = total_requests,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE user_id = :user_id
+                    RETURNING requests_remaining
                 """), {"quota": quota_to_add, "user_id": user_id})
+                
+                new_total = result.scalar()
                 conn.commit()
                 
                 # SEND NOTIFICATION
                 await send_telegram_notification(
                     user_id, 
-                    f"✅ **Pembayaran Berhasil!**\n\n"
-                    f"Paket: {plan_name}\n"
-                    f"Kuota Ditambah: +{quota_to_add}\n\n"
+                    f"✅ *Pembayaran Berhasil!*\n\n"
+                    f"📦 Paket: {plan_name}\n"
+                    f"➕ Kuota Ditambah: +{quota_to_add}\n"
+                    f"🎫 *Total Kuota Sekarang: {new_total}*\n\n"
                     f"Selamat menganalisis! 🚀"
+                )
+            
+            # If failed, notify user
+            elif new_status == 'failed':
+                plan_name = PLANS[plan_id]["name"]
+                logger.info(f"Transaction {order_id} failed for user {user_id}")
+                
+                await send_telegram_notification(
+                    user_id,
+                    f"❌ *Pembayaran Gagal/Kadaluarsa*\n\n"
+                    f"📦 Paket: {plan_name}\n"
+                    f"Status: {transaction_status.capitalize()}\n\n"
+                    f"Silakan lakukan pemesanan ulang jika masih berminat."
                 )
                 
         return {"status": "ok"}

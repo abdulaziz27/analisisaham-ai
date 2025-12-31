@@ -26,23 +26,26 @@ async def analisa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     3. If quota available → decrement, process, send results
     """
     user_id = str(update.effective_user.id)
+    user_data = {
+        "user_id": user_id,
+        "username": update.effective_user.username,
+        "first_name": update.effective_user.first_name,
+        "last_name": update.effective_user.last_name,
+        "language_code": update.effective_user.language_code,
+        "is_premium": getattr(update.effective_user, 'is_premium', False)
+    }
     
     # Parse ticker from command
-    if not context.args or len(context.args) == 0:
-        await update.message.reply_text(
-            "❌ Format salah. Gunakan: `/analisa TICKER`\n\nContoh: `/analisa BBCA`",
-            parse_mode='Markdown'
-        )
-        return
+    # ... (ticker parsing) ...
     
     ticker = context.args[0].upper().strip()
     
     try:
-        # Step 1: Check quota
+        # Step 1: Check quota (and update user info)
         async with httpx.AsyncClient(timeout=10.0) as client:
             quota_response = await client.get(
                 f"{BASE_URL}/quota/check",
-                params={"user_id": user_id}
+                params=user_data
             )
             
             if quota_response.status_code != 200:
@@ -191,9 +194,9 @@ async def analisa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Send summary
         keyboard = [
             [
-                InlineKeyboardButton("💾 Save Watchlist", callback_data=f"save:{ticker}")
+                InlineKeyboardButton("Save Watchlist", callback_data=f"save:{ticker}")
             ],
-            [InlineKeyboardButton("🔝 Upgrade Plan", callback_data="upgrade")]
+            [InlineKeyboardButton("Upgrade Plan", callback_data="upgrade")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -238,11 +241,11 @@ async def analisa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton("🔝 Upgrade Plan", callback_data="upgrade")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(
-                "❌ Kuota habis. Silakan upgrade plan Anda.",
+                "Kuota habis. Silakan upgrade plan Anda.",
                 reply_markup=reply_markup
             )
         else:
             # Generic error
             await update.message.reply_text(
-                f"❌ Error: {error_msg[:300]}"
+                f"Error: {error_msg[:300]}"
             )
