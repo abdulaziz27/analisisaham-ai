@@ -1,16 +1,19 @@
-
 """
 Payment Service
-Handles Midtrans integration and transaction management
+Handles Midtrans integration and transaction management using SQLAlchemy ORM
 """
 import midtransclient
-from sqlalchemy import text
+from sqlalchemy.orm import Session
 from backend.app.core.config import settings
-from backend.app.services.quota import engine
+from backend.app.models.database import PaymentTransaction, UserQuota
+from backend.app.core.http_client import get_http_client
 import logging
 import json
 import time
 import uuid
+from typing import Optional
+from datetime import datetime, timedelta
+import pytz
 
 logger = logging.getLogger(__name__)
 
@@ -28,33 +31,22 @@ PLANS = {
     "sultan": {"name": "Paket Sultan", "price": 500000, "quota": 1000},
 }
 
-def ensure_payment_tables():
-    """Create transactions table if not exists"""
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS transactions (
-                    order_id VARCHAR(255) PRIMARY KEY,
-                    user_id VARCHAR(255) NOT NULL,
-                    plan_id VARCHAR(50) NOT NULL,
-                    amount INTEGER NOT NULL,
-                    status VARCHAR(50) DEFAULT 'pending',
-                    payment_url TEXT,
-                    snap_token VARCHAR(255),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """))
-            conn.commit()
-    except Exception as e:
-        logger.error(f"Error creating payment tables: {str(e)}")
 
-# Initialize tables on module load
-ensure_payment_tables()
-
-async def create_transaction(user_id: str, plan_id: str) -> dict:
+async def create_transaction(
+    user_id: str, 
+    plan_id: str,
+    db: Session
+) -> dict:
     """
     Create a new QRIS transaction via Core API
+    
+    Args:
+        user_id: Telegram user ID
+        plan_id: Plan identifier (basic, pro, sultan)
+        db: Database session
+    
+    Returns:
+        Dict with transaction details including payment URL
     """
     if plan_id not in PLANS:
         raise ValueError(f"Invalid plan_id: {plan_id}")
@@ -93,20 +85,13 @@ async def create_transaction(user_id: str, plan_id: str) -> dict:
         # Create Core API Transaction
         response = core_api.charge(param)
         
-        # Calculate expiry time string for display (approximate based on request time)
-        # Midtrans response usually has transaction_time, but expiry_time depends on custom_expiry
-        # We'll calculate it locally for display accuracy
-        from datetime import datetime, timedelta
-        import pytz
-        
-        # WIB Timezone
+        # Calculate expiry time string for display
         tz_wib = pytz.timezone('Asia/Jakarta')
         now = datetime.now(tz_wib)
         expiry_time = now + timedelta(minutes=expiry_duration)
         expiry_str = expiry_time.strftime("%H:%M WIB")
         
         # Extract QR Code URL
-        # For Sandbox, actions might contain the qr url
         qr_url = None
         if 'actions' in response:
             for action in response['actions']:
@@ -114,34 +99,25 @@ async def create_transaction(user_id: str, plan_id: str) -> dict:
                     qr_url = action['url']
                     break
         
-        # Fallback/Direct access (depends on Midtrans version response)
-        if not qr_url and 'qr_string' in response:
-             # If raw QR string is provided, we might need to generate image ourselves
-             # But usually actions['url'] is the image for Sandbox
-             pass
-             
-        # In Sandbox, QRIS is simulated via GoPay
-        if settings.MIDTRANS_IS_PRODUCTION is False and not qr_url:
-             # Sandbox often returns actions for simulator
-             pass
-
-        # Save to DB
-        with engine.connect() as conn:
-            conn.execute(text("""
-                INSERT INTO transactions (order_id, user_id, plan_id, amount, status, payment_url, snap_token)
-                VALUES (:order_id, :user_id, :plan_id, :amount, 'pending', :payment_url, NULL)
-            """), {
-                "order_id": order_id,
-                "user_id": user_id,
-                "plan_id": plan_id,
-                "amount": plan["price"],
-                "payment_url": qr_url, # Store QR Image URL here
-            })
-            conn.commit()
-            
+        # Save to DB using ORM
+        transaction = PaymentTransaction(
+            order_id=order_id,
+            user_id=user_id,
+            plan_id=plan_id,
+            amount=plan["price"],
+            status="pending",
+            payment_type="qris",
+            midtrans_response=json.dumps(response)
+        )
+        db.add(transaction)
+        db.commit()
+        db.refresh(transaction)
+        
+        logger.info(f"Created transaction {order_id} for user {user_id}, plan {plan_id}")
+        
         return {
             "order_id": order_id,
-            "payment_url": qr_url, # This will be the QR Image URL
+            "payment_url": qr_url,
             "plan_name": plan["name"],
             "amount": plan["price"],
             "type": "qris",
@@ -150,28 +126,37 @@ async def create_transaction(user_id: str, plan_id: str) -> dict:
         
     except Exception as e:
         logger.error(f"Error creating transaction: {str(e)}")
+        db.rollback()
         raise Exception(f"Gagal membuat QRIS: {str(e)}")
 
-import httpx
-
-# ... (imports existing)
 
 async def send_telegram_notification(user_id: str, message: str):
     """Send notification to user via Telegram API"""
     try:
         url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
-        async with httpx.AsyncClient() as client:
-            await client.post(url, json={
-                "chat_id": user_id,
-                "text": message,
-                "parse_mode": "Markdown"
-            })
+        client = get_http_client()
+        await client.post(url, json={
+            "chat_id": user_id,
+            "text": message,
+            "parse_mode": "Markdown"
+        })
     except Exception as e:
         logger.error(f"Failed to send Telegram notification: {e}")
 
-async def process_notification(notification_data: dict) -> dict:
+
+async def process_notification(
+    notification_data: dict,
+    db: Session
+) -> dict:
     """
     Process Midtrans notification webhook
+    
+    Args:
+        notification_data: Midtrans notification payload
+        db: Database session
+    
+    Returns:
+        Dict with processing status
     """
     try:
         # Extract variables
@@ -190,81 +175,97 @@ async def process_notification(notification_data: dict) -> dict:
                 new_status = 'success'
         elif transaction_status == 'settlement':
             new_status = 'success'
-        elif transaction_status == 'cancel' or transaction_status == 'deny' or transaction_status == 'expire':
+        elif transaction_status in ['cancel', 'deny', 'expire']:
             new_status = 'failed'
         elif transaction_status == 'pending':
             new_status = 'pending'
         
-        # Update Transaction Status
-        with engine.connect() as conn:
-            # Check current status first
-            result = conn.execute(text("SELECT status, user_id, plan_id FROM transactions WHERE order_id = :order_id"), {"order_id": order_id})
-            row = result.fetchone()
-            
-            if not row:
-                logger.warning(f"Transaction {order_id} not found")
-                return {"status": "not_found"}
-                
-            current_status, user_id, plan_id = row
-            
-            if current_status == 'success':
-                logger.info(f"Transaction {order_id} already success, ignoring")
-                return {"status": "ok", "message": "Already success"}
-            
-            # Update status
-            conn.execute(text("""
-                UPDATE transactions 
-                SET status = :status, updated_at = CURRENT_TIMESTAMP
-                WHERE order_id = :order_id
-            """), {"status": new_status, "order_id": order_id})
-            conn.commit()
-            
-            # If success, add quota AND notify user
-            if new_status == 'success':
-                quota_to_add = PLANS[plan_id]["quota"]
-                plan_name = PLANS[plan_id]["name"]
-                
-                logger.info(f"Adding {quota_to_add} quota to user {user_id}")
-                
-                # Update and get new total
-                result = conn.execute(text("""
-                    UPDATE user_quotas 
-                    SET 
-                        requests_remaining = requests_remaining + :quota,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = :user_id
-                    RETURNING requests_remaining
-                """), {"quota": quota_to_add, "user_id": user_id})
-                
-                new_total = result.scalar()
-                conn.commit()
-                
-                # SEND NOTIFICATION
-                await send_telegram_notification(
-                    user_id, 
-                    f"✅ *Pembayaran Berhasil!*\n\n"
-                    f"📦 Paket: {plan_name}\n"
-                    f"➕ Kuota Ditambah: +{quota_to_add}\n"
-                    f"🎫 *Total Kuota Sekarang: {new_total}*\n\n"
-                    f"Selamat menganalisis! 🚀"
+        # Get transaction from DB
+        transaction = db.query(PaymentTransaction).filter(
+            PaymentTransaction.order_id == order_id
+        ).first()
+        
+        if not transaction:
+            logger.warning(f"Transaction {order_id} not found")
+            return {"status": "not_found"}
+        
+        # Skip if already success (idempotent)
+        if transaction.status == 'success':
+            logger.info(f"Transaction {order_id} already success, ignoring")
+            return {"status": "ok", "message": "Already success"}
+        
+        # Update transaction status
+        transaction.status = new_status
+        transaction.midtrans_response = json.dumps(notification_data)
+        if 'transaction_time' in notification_data:
+            try:
+                transaction.transaction_time = datetime.fromisoformat(
+                    notification_data['transaction_time'].replace('Z', '+00:00')
                 )
-            
-            # If failed, notify user
-            elif new_status == 'failed':
-                plan_name = PLANS[plan_id]["name"]
-                logger.info(f"Transaction {order_id} failed for user {user_id}")
-                
-                await send_telegram_notification(
-                    user_id,
-                    f"❌ *Pembayaran Gagal/Kadaluarsa*\n\n"
-                    f"📦 Paket: {plan_name}\n"
-                    f"Status: {transaction_status.capitalize()}\n\n"
-                    f"Silakan lakukan pemesanan ulang jika masih berminat."
+            except:
+                pass
+        if 'settlement_time' in notification_data:
+            try:
+                transaction.settlement_time = datetime.fromisoformat(
+                    notification_data['settlement_time'].replace('Z', '+00:00')
                 )
-                
+            except:
+                pass
+        
+        db.commit()
+        
+        # If success, add quota AND notify user
+        if new_status == 'success':
+            quota_to_add = PLANS[transaction.plan_id]["quota"]
+            plan_name = PLANS[transaction.plan_id]["name"]
+            
+            logger.info(f"Adding {quota_to_add} quota to user {transaction.user_id}")
+            
+            # Update user quota
+            quota = db.query(UserQuota).filter(
+                UserQuota.user_id == transaction.user_id
+            ).first()
+            
+            if quota:
+                quota.requests_remaining += quota_to_add
+            else:
+                # Create quota if doesn't exist
+                quota = UserQuota(
+                    user_id=transaction.user_id,
+                    requests_remaining=quota_to_add,
+                    total_requests=0
+                )
+                db.add(quota)
+            
+            db.commit()
+            db.refresh(quota)
+            
+            # Send notification
+            await send_telegram_notification(
+                transaction.user_id,
+                f"✅ *Pembayaran Berhasil!*\n\n"
+                f"📦 Paket: {plan_name}\n"
+                f"➕ Kuota Ditambah: +{quota_to_add}\n"
+                f"🎫 *Total Kuota Sekarang: {quota.requests_remaining}*\n\n"
+                f"Selamat menganalisis! 🚀"
+            )
+        
+        # If failed, notify user
+        elif new_status == 'failed':
+            plan_name = PLANS[transaction.plan_id]["name"]
+            logger.info(f"Transaction {order_id} failed for user {transaction.user_id}")
+            
+            await send_telegram_notification(
+                transaction.user_id,
+                f"❌ *Pembayaran Gagal/Kadaluarsa*\n\n"
+                f"📦 Paket: {plan_name}\n"
+                f"Status: {transaction_status.capitalize()}\n\n"
+                f"Silakan lakukan pemesanan ulang jika masih berminat."
+            )
+        
         return {"status": "ok"}
-
         
     except Exception as e:
         logger.error(f"Error processing notification: {str(e)}")
+        db.rollback()
         raise Exception(f"Notification processing error: {str(e)}")

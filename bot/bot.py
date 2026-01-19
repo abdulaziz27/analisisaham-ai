@@ -2,17 +2,11 @@
 Telegram Bot Main Entry Point
 """
 import os
-import sys
 import logging
-from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-
-# Add project root to path
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
 
 from telegram import Update, BotCommand
 from telegram.ext import (
@@ -27,6 +21,7 @@ from bot.handlers.start import start_command
 from bot.handlers.analisa import analisa_command
 from bot.handlers.quota import kuota_command
 from bot.handlers.callbacks import handle_callback
+from bot.core.http_client import close_http_client
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -71,6 +66,15 @@ async def post_init(application: Application):
     except Exception as e:
         logger.error(f"Failed to update bot commands: {e}")
 
+
+async def post_shutdown(application: Application):
+    """
+    Cleanup on shutdown
+    """
+    logger.info("Shutting down bot...")
+    await close_http_client()
+
+
 def main():
     """
     Start the bot
@@ -82,7 +86,7 @@ def main():
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
     
     # Create application with post_init hook
-    application = Application.builder().token(bot_token).post_init(post_init).build()
+    application = Application.builder().token(bot_token).post_init(post_init).post_shutdown(post_shutdown).build()
     
     # Add handlers
     application.add_handler(CommandHandler("start", start_command))

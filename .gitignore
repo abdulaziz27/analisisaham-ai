@@ -2,29 +2,90 @@
 .env
 .env.local
 .env.*
-env.example
+# Note: env.example should be tracked (template file)
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
 venv/
 .venv/
 env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
 # IDE & OS
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 .DS_Store
+Thumbs.db
 
 # Logs
 *.log
 logs/
 tmp/
+temp/
+*.tmp
 
 # Database
 *.sqlite3
 *.db
+*.sql
+
+# Chart/Image temporary files
+/tmp/*.png
+/tmp/*.jpg
+/tmp/*.jpeg
+/tmp/*.pdf
+*.png
+!docs/*.png
+!README.md
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Alembic
+# Keep migration files but ignore empty ones
+# alembic/versions/*.pyc
 
 # Midtrans / Payment debugging
 debug_payment.py
+check_*.py
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Vercel
+.vercel
+
+# Local development
+*.local

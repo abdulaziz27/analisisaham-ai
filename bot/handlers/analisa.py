@@ -2,18 +2,10 @@
 Analisa command handler
 Handles /analisa TICKER command
 """
-import httpx
 import os
-import sys
-from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-
-# Add project root to path
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
-
-BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+from bot.core.http_client import get_http_client, BASE_URL
 
 
 async def analisa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -36,38 +28,43 @@ async def analisa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     
     # Parse ticker from command
-    # ... (ticker parsing) ...
+    if not context.args or len(context.args) == 0:
+        await update.message.reply_text(
+            "❌ Format: /analisa TICKER\nContoh: /analisa BBCA"
+        )
+        return
     
     ticker = context.args[0].upper().strip()
     
     try:
+        client = get_http_client()
+        
         # Step 1: Check quota (and update user info)
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            quota_response = await client.get(
-                f"{BASE_URL}/quota/check",
-                params=user_data
+        quota_response = await client.get(
+            f"{BASE_URL}/quota/check",
+            params=user_data
+        )
+        
+        if quota_response.status_code != 200:
+            await update.message.reply_text(
+                "⚠️ Server sibuk, coba lagi nanti."
             )
+            return
+        
+        quota_data = quota_response.json()
+        
+        if not quota_data.get("ok") or quota_data.get("remaining", 0) <= 0:
+            # No quota - show upgrade button
+            keyboard = [
+                [InlineKeyboardButton("🔝 Upgrade Plan", callback_data="upgrade")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
             
-            if quota_response.status_code != 200:
-                await update.message.reply_text(
-                    "⚠️ Server sibuk, coba lagi nanti."
-                )
-                return
-            
-            quota_data = quota_response.json()
-            
-            if not quota_data.get("ok") or quota_data.get("remaining", 0) <= 0:
-                # No quota - show upgrade button
-                keyboard = [
-                    [InlineKeyboardButton("🔝 Upgrade Plan", callback_data="upgrade")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await update.message.reply_text(
-                    "❌ Kuota habis. Silakan upgrade plan Anda untuk melanjutkan.",
-                    reply_markup=reply_markup
-                )
-                return
+            await update.message.reply_text(
+                "❌ Kuota habis. Silakan upgrade plan Anda untuk melanjutkan.",
+                reply_markup=reply_markup
+            )
+            return
         
         # Step 2: Send processing message
         processing_msg = await update.message.reply_text(
@@ -75,27 +72,25 @@ async def analisa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         # Step 3: Early decrement quota
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
-                f"{BASE_URL}/quota/decrement",
-                json={"user_id": user_id}
-            )
+        await client.post(
+            f"{BASE_URL}/quota/decrement",
+            json={"user_id": user_id}
+        )
         
         # Step 4: Call analyze endpoint
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            analyze_response = await client.post(
-                f"{BASE_URL}/api/analyze",
-                json={"ticker": ticker, "user_id": user_id}
+        analyze_response = await client.post(
+            f"{BASE_URL}/api/analyze",
+            json={"ticker": ticker, "user_id": user_id}
+        )
+        
+        if analyze_response.status_code != 200:
+            error_detail = analyze_response.json().get("detail", "Unknown error")
+            await processing_msg.edit_text(
+                f"❌ Error: {error_detail[:200]}"
             )
-            
-            if analyze_response.status_code != 200:
-                error_detail = analyze_response.json().get("detail", "Unknown error")
-                await processing_msg.edit_text(
-                    f"❌ Error: {error_detail[:200]}"
-                )
-                return
-            
-            data = analyze_response.json()
+            return
+        
+        data = analyze_response.json()
         
         # Step 5: Format and send results
         indicators = data.get("indicators", {})
@@ -112,8 +107,6 @@ async def analisa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ema20 = indicators.get("ema20", 0)
         ema50 = indicators.get("ema50", 0)
         volume_avg = indicators.get("volume_avg", 0)
-        # Get current volume from latest OHLCV data if available, otherwise use None
-        volume_current = None
         
         # Determine trend
         trend_icon = "📈" if change_pct > 0 else "📉" if change_pct < 0 else "➡️"
@@ -146,9 +139,6 @@ async def analisa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if entry_high <= entry_low:
             entry_high = price * 1.02  # 2% above current if calculation fails
         
-        # Volume comparison (skip if volume data not available)
-        volume_info = ""
-        
         # Period change info
         period_info = f"1 hari: {change_pct:+.2f}%"
         if change_7d is not None:
@@ -180,7 +170,6 @@ async def analisa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • RSI: {rsi:.2f}{rsi_status}
 • {ema_relation}
 • MACD: {macd_signal}
-{volume_info}
 
 *3) Analisis AI*
 {ai_report}
@@ -220,13 +209,7 @@ async def analisa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 # Just log error, don't spam user
                 print(f"Error sending chart: {e}")
-                
-        # Step 7: Send full report logic REMOVED
     
-    except httpx.TimeoutException:
-        await update.message.reply_text(
-            "⏱️ Request timeout. Server sibuk, coba lagi nanti."
-        )
     except Exception as e:
         error_msg = str(e)
         
